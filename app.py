@@ -1,4 +1,4 @@
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, stream_with_context
 import time
 from flask_cors import CORS
 from embedchain import App
@@ -37,7 +37,6 @@ def stream():
     def generate():
         for char in lorem_ipsum_text:
             yield char
-            time.sleep(0.01)
         yield
 
     
@@ -66,11 +65,14 @@ def rag_stream():
         """
         # result = RAG_app.query(prompt)
 
-        def generate():
-            for chunk in RAG_app.query(prompt, streaming=True):
-                yield chunk
+        # def generate():
+        #     for chunk in RAG_app.query(prompt):
+        #         yield chunk
 
-        return Response(generate(), content_type='text/event-stream')
+        def generate():
+            yield RAG_app.query(prompt)
+
+        return Response(stream_with_context(generate()), content_type='text/event-stream')
 
     
     else:
