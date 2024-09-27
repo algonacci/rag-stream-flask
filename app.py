@@ -1,7 +1,11 @@
 from flask import Flask, Response, jsonify, request, stream_with_context
-import time
+import threading
+import queue
 from flask_cors import CORS
 from embedchain import App
+from embedchain.config import BaseLlmConfig
+from embedchain.helpers.callbacks import StreamingStdOutCallbackHandlerYield, generate
+
 
 app = Flask(__name__)
 CORS(app, resources={
@@ -42,7 +46,6 @@ def stream():
     
     return Response(generate(), content_type='text/event-stream')
 
-
 @app.route("/rag_stream", methods=["GET", "POST"])
 def rag_stream():
     if request.method == "POST":
@@ -56,33 +59,52 @@ def rag_stream():
         tipe_perjalanan = input_data["tipe_perjalanan"]
         transportasi = input_data["transportasi"]
 
+        # Build the prompt
         prompt = f"""
         Tolong buatkan rencana perjalanan dengan rincian waktu dan rincian perkiraan biaya selama perjalanan
         dengan anggaran ${budget} ${mata_uang} dalam format Rp. per orang selama ${lama_perjalanan} hari, 
         untuk perjalanan ${tipe_perjalanan} pada musim ${musim}, di ${city} untuk ${jumlah_orang} orang, 
-        dengan transportasi ${transportasi}. Buatkan dalam format HTML, namun langsung isi nya saja, child dari <article>. 
+        dengan transportasi ${transportasi}. Buatkan dalam format HTML, namun langsung isi nya saja tanpa ```html, child dari <article>. 
         Tulis dengan jelas dan menarik serta bold nama tempat yang dikunjungi. Terima kasih.
         """
-        # result = RAG_app.query(prompt)
 
-        # def generate():
-        #     for chunk in RAG_app.query(prompt):
-        #         yield chunk
+        # Queue to handle streaming output
+        q = queue.Queue()
 
-        def generate():
-            yield RAG_app.query(prompt)
+        # Thread target function for generating the response
+        def app_response(result):
+            llm_config = RAG_app.llm.config.as_dict()
+            if "http_client" in llm_config:
+                del llm_config["http_client"]
+                del llm_config["http_async_client"]
+            llm_config["callbacks"] = [StreamingStdOutCallbackHandlerYield(q=q)]
+            config = BaseLlmConfig(**llm_config)
+            answer = RAG_app.chat(prompt, config=config)
+            result["answer"] = answer
 
-        return Response(stream_with_context(generate()), content_type='text/event-stream')
+        # Result dictionary to store the final response
+        results = {}
+        # Start a thread to handle the LLM response
+        thread = threading.Thread(target=app_response, args=(results,))
+        thread.start()
 
-    
-    else:
-        return jsonify({
-            "status": {
-                "code": 405,
-                "message": "Method not allowed",
-            },
-            "data": None
-        }), 405
+        # Streaming response generator for Server-Sent Events (SSE)
+        def generate_response():
+            full_response = ""
+            # Streaming chunks from the queue as they become available
+            for answer_chunk in generate(q):
+                full_response += answer_chunk
+                
+                yield answer_chunk  # Directly yielding the chunk to the client
+            print(full_response)
+            yield
+
+
+        # Return the response as SSE (Server-Sent Event)
+        return Response(stream_with_context(generate_response()), content_type='text/event-stream')
+
+
+
 
 if __name__ == "__main__":
     app.run(debug=True, threaded=True)
